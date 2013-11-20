@@ -3,7 +3,7 @@ module EMGMM
 using Distributions
 import Base.copy
 
-export predict, emgmm, kmeans, GMM
+export predict,predict_proba,learn, emgmm,kmeans,GMM
 
 type GMM
   means::Array{Float64}
@@ -17,8 +17,8 @@ function copy(A::GMM)
 end
 
 function Base.show(io::IO, model::GMM)
-  @printf io "Gaussian Mixture Model:\n"
-  @printf io " * Type: %s\n" model.modeltype
+  println(io, "Gaussian Mixture Model:")
+  println(io, " * Type: ", model.modeltype)
   println(io, " * Prior probabilities: ", model.priors)
   println(io, " * Means: ", model.means)
   println(io, " * Covariances: ")
@@ -27,18 +27,47 @@ function Base.show(io::IO, model::GMM)
   end
 end
 
+# learn a gmm
+function learn(X::Matrix,k,modeltype="full")
+  (model,_tmp) = emgmm(X,k,modeltype)
+  model
+end
+
 # hard assignment
 function predict(X::Matrix, model::GMM)
-  result = predict_proba(X,model)
-  return result  # TODO: threshold and return hard assignment
+  membership = predict_proba(X,model)
+  k = size(membership,2)
+  if k > 1
+    n = size(membership,1)
+    result = zeros(Float64, (n,))
+    for i=1:n
+      maxj = 0.
+      maxv = 0.
+      for j=1:k
+        if membership[i,j] > maxv
+          maxv = membership[i,j]
+          maxj = j
+        end
+        result[i] = maxj
+      end
+    end
+  else
+    result = membership # already membership index
+  end
+  result  
 end
 
 # soft assignment
 function predict_proba(X::Matrix, model::GMM)
-  if model.covariancetype == "none" # kmeans, had assignment
+  local membership
+  if model.covariancetype == "none" # kmeans, hard assignment
+    (_means,membership,_compactness) = kmeans(X,size(model.priors),1,1,typemax(Float64),model.means)
   else # 
+    (_model,membership,_loglike) = emgmm(X,size(model.priors),model.modeltype,1,1,typemax(Float64),model)
   end
+  membership
 end
+
 
 # find initial means that are furthest from each other:
 function furthestmeans(X::Matrix, k::Integer)
@@ -75,29 +104,43 @@ function kmeans(X::Matrix,
                k::Integer,
                maxiters::Integer = 300,
                repeats::Integer = 6,
-               accuracy::Float64 = 1e-5)
+               accuracy::Float64 = 1e-5,
+               initialmeans = None)
   n = size(X,1) # num data pts
   d = size(X,2) # data dimension
+  println("maxiters: ",maxiters," repeats: ",repeats)
 
   bestcompactness = typemax(Float64)
   bestmeans = zeros(Float64,(k,d))
+  bestmembership = zeros(Float64,(n,))
+
+  if initialmeans == None
+    # no point to multiple runs
+    maxiters = 1
+  end
 
   # main loop
   for repeat=1:repeats
     println("----------------")
     println("kmeans repeat: ",repeat)
     # initialize means using furthest-means:
-    means = furthestmeans(X,k)
+    if initialmeans == None
+      means = furthestmeans(X,k)
+    else
+      means = copy(initialmeans)
+    end
     count = zeros(Float64, k)
     compactness = typemax(Float64)
     lastmeans = copy(means)
     lastcompactness = copy(compactness)
     # iterate until max iters or compactness stops changing:
     for iter=1:maxiters
+      println("km iter: ",iter)
       lastmeans = copy(means)
       lastcompactness = copy(compactness)
       means = zeros(Float64, (k,d))
       count = zeros(Float64, k)
+      membership = zeros(Float64, (n,))
       compactness = 0
       for i=1:n
         mindist = typemax(Float64)
@@ -111,9 +154,12 @@ function kmeans(X::Matrix,
         end
         means[mindisti,:] += X[i,:]
         count[mindisti] += 1
+        membership[i] = mindisti
         compactness += mindist
       end
       println("iter: ", iter, " compactness: ", compactness)
+      println("lastc: ",lastcompactness)
+      println("acc: ", accuracy)
       if abs(compactness-lastcompactness) < accuracy
         println("kmeans converged in ", iter, " iters")
         break
@@ -122,12 +168,13 @@ function kmeans(X::Matrix,
         means[j,:] /= count[j]
       end
     end
-    if compactness < bestcompactness
+    if compactness < bestcompactness || maxiters == 1
       bestcompactness = compactness
       bestmeans = copy(lastmeans)
+      bestmembership = copy(bestmembership)
     end
   end
-  return bestmeans
+  return bestmeans,bestmembership,bestcompactness
 end
  
 # compute parameters of GMM using EM
@@ -136,7 +183,8 @@ function emgmm(X::Matrix,
                modeltype::String = "full",
                maxiters::Integer = 300,
                repeats::Integer = 6,
-               accuracy::Float64 = 1e-5)
+               accuracy::Float64 = 1e-5,
+               initialmodel = None)
   n = size(X,1) # num data pts
   d = size(X,2) # data dimension
   priors = zeros(Float64,k)
@@ -145,8 +193,15 @@ function emgmm(X::Matrix,
   
   bestmodel = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), zeros(Float64,k),modeltype)
   bestloglike = typemin(Float64)
+  bestmembership = zeros(Float64,(n,k))
   model = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), zeros(Float64,k),modeltype)
   loglike = 0
+  membership = zeros(Float64,(n,k))
+
+  if initialmodel == None
+    # no point to multiple runs
+    repeats = 1
+  end
 
   # main loop
   for repeat=1:repeats
@@ -155,7 +210,11 @@ function emgmm(X::Matrix,
 
     # initialize with kmeans and uniform prior:
     model = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), ((1/k)*ones(Float64,k)),modeltype)
-    model.means = kmeans(X,k,maxiters,1,accuracy)
+    if initialmodel == None
+      (model.means,_tmp1,_tmp2) = kmeans(X,k,maxiters,1,accuracy)
+    else
+      model = copy(initialmodel)
+    end
     for j=1:k
       model.covariances[j,:,:] = reshape(eye(d,d),(1,d,d))
     end
@@ -163,34 +222,33 @@ function emgmm(X::Matrix,
       return bestmodel
     end
     
-    weights = zeros(Float64, (n,k))
-    loglike = 0
-    lastmodel = copy(model)
-    lastloglike = copy(loglike)
+    lastmodel = copy(model) # so var is in scope below..
+    lastmembership = copy(membership)
+    lastloglike = loglike
     # iterate until max iters or loglike stops changing:
     for iter=1:maxiters
       lastmodel = copy(model)
       lastloglike = copy(loglike)
       model = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), zeros(Float64,k),modeltype)
-      weights = zeros(Float64, (n,k))
+      membership = zeros(Float64, (n,k))
       counts = zeros(Float64, (k,))
       loglike = 0
       for i=1:n
         for j=1:k
           NDist = MvNormal(reshape(lastmodel.means[j,:],(d,)),reshape(lastmodel.covariances[j,:,:],(d,d)))
-          weights[i,j] = pdf(NDist,reshape(X[i,:],(d,)))*lastmodel.priors[j]
-          #loglike += log(weights[i,j])
+          membership[i,j] = pdf(NDist,reshape(X[i,:],(d,)))*lastmodel.priors[j]
+          #loglike += log(membership[i,j])
           loglike += logpdf(NDist,reshape(X[i,:],(d,))) + log(lastmodel.priors[j])
         end
-        #weights /= sum(weights[i,:]) # x/y = exp(log(x)-log(y))
-        denom = log(sum(weights[i,:]))
+        #membership /= sum(membership[i,:]) # x/y = exp(log(x)-log(y))
+        denom = log(sum(membership[i,:]))
         for j=1:k
-          weights[i,j] = exp(log(weights[i,j]) - denom)
+          membership[i,j] = exp(log(membership[i,j]) - denom)
         end
         # compute the next mean while we're at it.
         for j=1:k
-          model.means[j,:] += X[i,:] * weights[i,j]
-          counts[j] += weights[i,j]
+          model.means[j,:] += X[i,:] * membership[i,j]
+          counts[j] += membership[i,j]
         end
       end
       println("iter: ", iter, ", log like: ", loglike)
@@ -205,20 +263,21 @@ function emgmm(X::Matrix,
       for i=1:n
         for j=1:k
           dif = X[i,:] - model.means[j,:]
-          model.covariances[j,:,:] += reshape(dif' * dif * weights[i,j], (1,d,d))
+          model.covariances[j,:,:] += reshape(dif' * dif * membership[i,j], (1,d,d))
         end
       end
       for j=1:k
         model.covariances[j,:,:] /= counts[j]
       end
     end
-    if loglike > bestloglike
+    if loglike > bestloglike || maxiters == 1
       bestloglike = loglike
       bestmodel = copy(lastmodel)
+      bestmembership = copy(lastmembership)
     end
   end
   
-  return bestmodel
+  return bestmodel,bestmembership,bestloglike
 end
 
 end # module

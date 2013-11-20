@@ -19,7 +19,17 @@ println("means = ",m1,", ",m2)
 println("stdevs = ",sd1,", ",sd2)
 
 # fit the GMM to the data:
-model = emgmm(X,2,"full",300,6,1e-5)
+(model,membersip) = emgmm(X,2,"full",300,6,1e-5)
 
 println("best model:")
 println(model)
+
+
+# use learn, predict interface:
+
+println("kmeans example: ")
+model = learn(X,2,"none") # kmeans
+result = predict(X,model)
+c1 = mode(result[1:n])
+c2 = mode(result[n+1:n+n]
+println("error: ", sum(result[1:n]==c1)+sum(result[n+1:n+n]==c2))
