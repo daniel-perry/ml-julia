@@ -280,4 +280,135 @@ function emgmm(X::Matrix,
   return bestmodel,bestmembership,bestloglike
 end
 
+# compute parameters of GMM using iterative EM
+# See paper by Neal,Hinton in 1999 on EM.
+function emgmm_iterative(X::Matrix,
+                         k::Integer,
+                         modeltype::String = "full",
+                         maxiters::Integer = 300,
+                         repeats::Integer = 6,
+                         accuracy::Float64 = 1e-5,
+                         initialmodel = None)
+  n = size(X,1) # num data pts
+  d = size(X,2) # data dimension
+  priors = zeros(Float64,k)
+  means = zeros(Float64,(k,d))
+  covariance = zeros(Float64,(k,d,d))
+  
+  bestmodel = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), zeros(Float64,k),modeltype)
+  bestloglike = typemin(Float64)
+  bestmembership = zeros(Float64,(n,k))
+  model = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), zeros(Float64,k),modeltype)
+  loglike = 0
+  membership = zeros(Float64,(n,k))
+
+  if initialmodel == None
+    # no point to multiple runs
+    repeats = 1
+  end
+
+  # main loop
+  for repeat=1:repeats
+    println("=================")
+    println("emgmm repeat: ",repeat)
+
+    # initialize with kmeans and uniform prior:
+    model = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), ((1/k)*ones(Float64,k)),modeltype)
+    local _tmp1
+    local _tmp2
+    if initialmodel == None
+      (model.means,_tmp1,_tmp2) = kmeans(X,k,maxiters,1,accuracy)
+    else
+      model = copy(initialmodel)
+    end
+    for j=1:k
+      model.covariances[j,:,:] = reshape(eye(d,d),(1,d,d))
+    end
+    if modeltype == "none" # => kmeans
+      return model,_tmp1,1/_tmp2
+    end
+
+    # run normal EM once to get initial state.
+    model,membership,loglike = emgmm(X,k,modeltype,1,1,accuracy,initialmodel)
+
+    # setup the sufficent statistics
+    sufstat_mem = zeros(Float64, (k,))
+    sufstat_mean = zeros(Float64, (k,d))
+    sufstat_cov = zeros(Float64, (k,d,d))
+    for i=1:n
+      for j=1:k
+        sufstat_mem[j] += membership[i,j]
+        sufstat_mean[j,:] += membership[i,j]*X[i,:]
+        sufstat_cov[j,:,:] = reshape(sufstat_cov[j,:,:], (a,a)) + membership[i,j]*(X[i,:]'*X[i,:])
+      end
+    end
+    
+    lastmodel = copy(model) # so var is in scope below..
+    lastmembership = copy(membership)
+    lastloglike = loglike
+    # iterate until max iters or loglike stops changing:
+    for iter=1:maxiters
+      lastmodel = copy(model)
+      lastloglike = copy(loglike)
+      #model = GMM(zeros(Float64,(k,d)), zeros(Float64,(k,d,d)), zeros(Float64,k),modeltype)
+      #membership = zeros(Float64, (n,k))
+      #counts = zeros(Float64, (k,))
+      loglike = 0
+      roundsize = 10
+      for i=1:n
+        memb = zeros(Float64, (k,))
+        for j=1:k
+          NDist = MvNormal(reshape(lastmodel.means[j,:],(d,)),reshape(lastmodel.covariances[j,:,:],(d,d)))
+          memb[j] = pdf(NDist,reshape(X[i,:],(d,)))*lastmodel.priors[j]
+          #loglike += log(membership[i,j])
+          loglike += logpdf(NDist,reshape(X[i,:],(d,))) + log(lastmodel.priors[j])
+        end
+        #membership /= sum(membership[i,:]) # x/y = exp(log(x)-log(y))
+        denom = log(sum(memb))
+        for j=1:k
+          memb[j] = exp(log(memb[j]) - denom)
+        end
+        # update sufficient stats:
+        for j=1:k
+          sufstat_mem[j] -= membership[i,j]
+          sufstat_mean[j,:] -= membership[i,j]*X[i,:]
+          sufstat_cov[j,:,:] = reshape(sufstat_cov[j,:,:], (a,a)) - membership[i,j]*(X[i,:]'*X[i,:])
+          membership[i,:] = memb
+          sufstat_mem[j] += membership[i,j]
+          sufstat_mean[j,:] += membership[i,j]*X[i,:]
+          sufstat_cov[j,:,:] = reshape(sufstat_cov[j,:,:], (a,a)) + membership[i,j]*(X[i,:]'*X[i,:])
+        end
+        if i > 1 && (i-1)%roundsize == 0
+          # update the model parameters
+          for j=1:k
+            model.priors[j] = sufstat_mem[j]/sum(sufstat_mem)
+            model.means[j,:] = sufstat_mean[j]/sufstat_mem[j]
+            model.covariances[j,:,:] = (sufstat_cov[j]/sufstat_mem[j]) - model.means[j,:]'*model.means[j,:]
+          end
+        end
+      end
+      if n/roundsize != floor(n/roundsize)
+        # if our mod operator doesn't get all the points, recompute model again here:
+        for j=1:k
+          model.priors[j] = sufstat_mem[j]/sum(sufstat_mem)
+          model.means[j,:] = sufstat_mean[j]/sufstat_mem[j]
+          model.covariances[j,:,:] = (sufstat_cov[j]/sufstat_mem[j]) - model.means[j,:]'*model.means[j,:]
+        end
+      end
+      println("iter: ", iter, ", log like: ", loglike)
+      if abs(loglike-lastloglike) < accuracy
+        println("emgmm converged in ", iter, " iters")
+        break
+      end
+    end
+    if loglike > bestloglike || maxiters == 1
+      bestloglike = loglike
+      bestmodel = copy(lastmodel)
+      bestmembership = copy(lastmembership)
+    end
+  end
+  return bestmodel,bestmembership,bestloglike
+end
+
+
 end # module
