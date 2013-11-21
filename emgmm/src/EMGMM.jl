@@ -29,12 +29,20 @@ end
 
 # learn a gmm
 function learn(X::Matrix,k,modeltype="full")
-  (model,_tmp) = emgmm(X,k,modeltype)
+  local model
+  if modeltype == "none"
+    (means,_tmp1,_tmp2) = kmeans(X,k)
+    d = size(X,2)
+    model=GMM(means,zeros(Float64, (k,d,d)), zeros(Float64, (k,)), modeltype)
+  else
+    (model,_tmp1,_tmp2) = emgmm(X,k,modeltype)
+  end
+
   model
 end
 
 # hard assignment
-function predict(X::Matrix, model::GMM)
+function predict(X::Array{Float64}, model::GMM)
   membership = predict_proba(X,model)
   k = size(membership,2)
   if k > 1
@@ -58,10 +66,11 @@ function predict(X::Matrix, model::GMM)
 end
 
 # soft assignment
-function predict_proba(X::Matrix, model::GMM)
+function predict_proba(X::Array{Float64}, model::GMM)
   local membership
-  if model.covariancetype == "none" # kmeans, hard assignment
-    (_means,membership,_compactness) = kmeans(X,size(model.priors),1,1,typemax(Float64),model.means)
+  k = length(model.priors)
+  if model.modeltype == "none" # kmeans, hard assignment
+    (_means,membership,_compactness) = kmeans(X,k,1,1,typemax(Float64),model.means)
   else # 
     (_model,membership,_loglike) = emgmm(X,size(model.priors),model.modeltype,1,1,typemax(Float64),model)
   end
@@ -116,7 +125,7 @@ function kmeans(X::Matrix,
 
   if initialmeans == None
     # no point to multiple runs
-    maxiters = 1
+    repeats = 1
   end
 
   # main loop
@@ -135,7 +144,6 @@ function kmeans(X::Matrix,
     lastcompactness = copy(compactness)
     # iterate until max iters or compactness stops changing:
     for iter=1:maxiters
-      println("km iter: ",iter)
       lastmeans = copy(means)
       lastcompactness = copy(compactness)
       means = zeros(Float64, (k,d))
@@ -158,8 +166,6 @@ function kmeans(X::Matrix,
         compactness += mindist
       end
       println("iter: ", iter, " compactness: ", compactness)
-      println("lastc: ",lastcompactness)
-      println("acc: ", accuracy)
       if abs(compactness-lastcompactness) < accuracy
         println("kmeans converged in ", iter, " iters")
         break
