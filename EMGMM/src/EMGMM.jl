@@ -6,8 +6,8 @@ import Base.copy
 export predict,predict_proba,learn, emgmm,kmeans,GMM
 
 type GMM
-  means::Array{Float64}
-  covariances::Array{Float64}
+  means::Array{Float64,2}
+  covariances::Array{Float64,3}
   priors::Array{Float64}# prior probs of each distribution.
   modeltype::String # full, diag, uniform_diag, none (kmeans)
 end
@@ -42,7 +42,7 @@ function learn(X::Matrix,k,modeltype="full")
 end
 
 # hard assignment
-function predict(X::Array{Float64}, model::GMM)
+function predict(X::Array{Float64,2}, model::GMM)
   membership = predict_proba(X,model)
   k = size(membership,2)
   if k > 1
@@ -66,8 +66,8 @@ function predict(X::Array{Float64}, model::GMM)
 end
 
 # soft assignment
-function predict_proba(X::Array{Float64}, model::GMM)
-  local membership
+function predict_proba(X::Array{Float64,2}, model::GMM)
+  membership = []
   k = length(model.priors)
   if model.modeltype == "none" # kmeans, hard assignment
     (_means,membership,_compactness) = kmeans(X,k,1,1,typemax(Float64),model.means)
